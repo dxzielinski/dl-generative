@@ -1,0 +1,9 @@
+[project]
+name = "dl-generative"
+version = "0.1.0"
+description = "Image Generation"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "ipykernel>=6.29.5",
+]
