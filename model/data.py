@@ -23,13 +23,20 @@ class CatsDataModule(L.LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
 
+        self.dims = (3, 64, 64)
+        # it's not used for now
+        self.transform_train = transforms.Compose(
+            [
+                transforms.RandomApply(transforms.RandomRotation(30), p=0.2),
+                transforms.ToTensor(),
+                transforms.RandomErasing(p=0.2, scale=(0.001, 0.01), ratio=(1.2, 1.8)),
+            ]
+        )
         self.transform = transforms.Compose(
             [
                 transforms.ToTensor(),
             ]
         )
-
-        self.dims = (3, 64, 64)
         self.seed = seed
 
     def setup(self, stage=None):

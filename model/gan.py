@@ -58,7 +58,6 @@ class Discriminator(nn.Module):
             nn.Linear(512, 256),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Linear(256, 1),
-            nn.Sigmoid(),
         )
         self.to(self.device)
 
@@ -66,7 +65,6 @@ class Discriminator(nn.Module):
         img = img.to(self.device)
         img_flat = img.view(img.size(0), -1)
         validity = self.model(img_flat)
-
         return validity
 
 
@@ -76,12 +74,11 @@ class GAN(L.LightningModule):
         channels,
         width,
         height,
-        latent_dim: int = 500,
-        lr: float = 1e-5,
-        b1: float = 0.9,
+        latent_dim: int = 128,
+        lr: float = 2e-5,
+        b1: float = 0.5,
         b2: float = 0.999,
         batch_size: int = BATCH_SIZE,
-        **kwargs,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -95,7 +92,7 @@ class GAN(L.LightningModule):
         self.discriminator = Discriminator(img_shape=data_shape)
         self.validation_z = torch.randn(8, self.hparams.latent_dim)
         self.example_input_array = torch.zeros(2, self.hparams.latent_dim)
-        # self.fid = FrechetInceptionDistance()
+        self.fid = FrechetInceptionDistance(normalize=True).to(device)
 
     def forward(self, z):
         return self.generator(z)
@@ -118,14 +115,14 @@ class GAN(L.LightningModule):
         self.generated_imgs = self(z)
 
         # log sampled images
-        sample_imgs = self.generated_imgs[:6]
-        grid = torchvision.utils.make_grid(sample_imgs).permute(1, 2, 0).cpu().numpy()
-        grid_scaled = (grid - grid.min()) / (grid.max() - grid.min())
-        step = self.global_step
-        run_id = self.logger.run_id
-        self.logger.experiment.log_image(
-            image=grid_scaled, step=step, run_id=run_id, key="training_step_img"
-        )
+        # sample_imgs = self.generated_imgs[:6]
+        # grid = torchvision.utils.make_grid(sample_imgs).permute(1, 2, 0).cpu().numpy()
+        # grid_scaled = (grid - grid.min()) / (grid.max() - grid.min())
+        # step = self.global_step
+        # run_id = self.logger.run_id
+        # self.logger.experiment.log_image(
+        #     image=grid_scaled, step=step, run_id=run_id, key="training_step_img"
+        # )
 
         # ground truth result (ie: all fake)
         valid = torch.ones(imgs.size(0), 1)
@@ -142,13 +139,11 @@ class GAN(L.LightningModule):
         # train discriminator
         self.toggle_optimizer(optimizer_d)
 
-        # how well can it label as real?
         valid = torch.ones(imgs.size(0), 1)
         valid = valid.type_as(imgs)
 
         real_loss = self.adversarial_loss(self.discriminator(imgs), valid)
 
-        # how well can it label as fake?
         fake = torch.zeros(imgs.size(0), 1)
         fake = fake.type_as(imgs)
 
@@ -156,7 +151,6 @@ class GAN(L.LightningModule):
             self.discriminator(self.generated_imgs.detach()), fake
         )
 
-        # discriminator loss is the average of these
         d_loss = (real_loss + fake_loss) / 2
         self.log("d_loss", d_loss, prog_bar=True)
         self.manual_backward(d_loss)
@@ -165,11 +159,13 @@ class GAN(L.LightningModule):
         self.untoggle_optimizer(optimizer_d)
 
     def validation_step(self, batch, batch_idx):
-        pass
-        # imgs, _ = batch
-        # z = torch.randn(imgs.shape[0], self.hparams.latent_dim)
-        # gen_imgs = self(z)
-        # self.fid.update(imgs, gen_imgs)
+        imgs, _ = batch
+        z = torch.randn(imgs.shape[0], self.hparams.latent_dim)
+        gen_imgs = self(z)
+        real_imgs = (imgs + 1) / 2
+        gen_imgs = (gen_imgs + 1) / 2
+        self.fid.update(real_imgs, real=True)
+        self.fid.update(gen_imgs, real=False)
 
     def configure_optimizers(self):
         lr = self.hparams.lr
@@ -181,9 +177,9 @@ class GAN(L.LightningModule):
         return [opt_g, opt_d], []
 
     def on_validation_epoch_end(self):
-        # fid_score = self.fid.compute()
-        # self.log("fid_score", fid_score, prog_bar=True)
-        # self.fid.reset()
+        fid_score = self.fid.compute()
+        self.log("fid_score", fid_score, prog_bar=True)
+        self.fid.reset()
         z = self.validation_z.type_as(self.generator.model[0].weight)
 
         # log sampled images
@@ -198,6 +194,7 @@ class GAN(L.LightningModule):
 
 
 if __name__ == "__main__":
+    torch.cuda.empty_cache()
     data = CatsDataModule(
         data_dir=PATH_DATASETS,
         batch_size=BATCH_SIZE,
@@ -216,13 +213,11 @@ if __name__ == "__main__":
         precision="16-mixed",
         callbacks=[
             L.pytorch.callbacks.ModelCheckpoint(
-                monitor="d_loss",
+                monitor="fid_score",
                 mode="min",
                 dirpath="./checkpoints/gan/",
-                filename="gan-{epoch:02d}-{d_loss:.2f}-{g_loss:.2f}",
+                filename="gan-{epoch:02d}-{d_loss:.2f}-{g_loss:.2f}-{fid_score:.2f}",
             ),
         ],
     )
     trainer.fit(model, datamodule=data)
-    # Ubuntu 50 epochs in 1m27s876ms
-    # Newest setup 1m23s428ms - compare it with Windows
