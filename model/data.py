@@ -1,7 +1,7 @@
 import lightning as L
 import torch
 import torchvision.transforms as transforms
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 from torchvision.datasets import DatasetFolder
 from torchvision.datasets.folder import default_loader
 
@@ -24,17 +24,18 @@ class CatsDataModule(L.LightningDataModule):
         self.num_workers = num_workers
 
         self.dims = (3, 64, 64)
-        # it's not used for now
         self.transform_train = transforms.Compose(
             [
-                transforms.RandomApply(transforms.RandomRotation(30), p=0.2),
+                transforms.RandomApply([transforms.RandomRotation(30)], p=0.2),
                 transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
                 transforms.RandomErasing(p=0.2, scale=(0.001, 0.01), ratio=(1.2, 1.8)),
             ]
         )
         self.transform = transforms.Compose(
             [
                 transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ]
         )
         self.seed = seed
@@ -42,22 +43,42 @@ class CatsDataModule(L.LightningDataModule):
     def setup(self, stage=None):
         full_dataset = DatasetFolder(
             root=self.data_dir,
-            transform=self.transform,
+            transform=None,
             loader=default_loader,
             extensions=("png"),
         )
-        train_ds, val_ds, test_ds = random_split(
-            full_dataset,
-            [0.6, 0.2, 0.2],
-            generator=torch.Generator().manual_seed(self.seed),
+        N = len(full_dataset)
+        g = torch.Generator().manual_seed(self.seed)
+        perm = torch.randperm(N, generator=g).tolist()
+        n_train = int(0.6 * N)
+        n_val = int(0.2 * N)
+        train_idx = perm[:n_train]
+        val_idx = perm[n_train : n_train + n_val]
+        test_idx = perm[n_train + n_val :]
+        train_ds_full = DatasetFolder(
+            root=self.data_dir,
+            loader=default_loader,
+            extensions=("png",),
+            transform=self.transform_train,
         )
-
+        val_ds_full = DatasetFolder(
+            root=self.data_dir,
+            loader=default_loader,
+            extensions=("png",),
+            transform=self.transform,
+        )
+        test_ds_full = DatasetFolder(
+            root=self.data_dir,
+            loader=default_loader,
+            extensions=("png",),
+            transform=self.transform,
+        )
         if stage == "fit":
-            self.train_ds = train_ds
-            self.val_ds = val_ds
+            self.train_ds = Subset(train_ds_full, train_idx)
+            self.val_ds = Subset(val_ds_full, val_idx)
 
         if stage == "test":
-            self.test_ds = test_ds
+            self.test_ds = Subset(test_ds_full, test_idx)
 
     def train_dataloader(self):
         return DataLoader(

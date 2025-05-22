@@ -66,7 +66,8 @@ class DCGAN(GAN):
         width,
         height,
         latent_dim: int = 128,
-        lr: float = 2e-5,
+        lr_g: float = 2e-4,
+        lr_d: float = 4e-4,
         b1: float = 0.5,
         b2: float = 0.999,
         batch_size: int = BATCH_SIZE,
@@ -82,6 +83,18 @@ class DCGAN(GAN):
         self.example_input_array = torch.zeros(2, self.hparams.latent_dim)
         self.fid = FrechetInceptionDistance(normalize=True).to(device)
 
+    def configure_optimizers(self):
+        lr_g = self.hparams.lr_g
+        lr_d = self.hparams.lr_d
+        b1 = self.hparams.b1
+        b2 = self.hparams.b2
+
+        opt_g = torch.optim.Adam(self.generator.parameters(), lr=lr_g, betas=(b1, b2))
+        opt_d = torch.optim.Adam(
+            self.discriminator.parameters(), lr=lr_d, betas=(b1, b2)
+        )
+        return [opt_g, opt_d], []
+
 
 if __name__ == "__main__":
     torch.cuda.empty_cache()
@@ -92,9 +105,9 @@ if __name__ == "__main__":
         experiment_name="DCGAN",
         tracking_uri="./mlruns",
     )
-    model = DCGAN(*data.dims, latent_dim=128, lr=1e-4, ngf=64, ndf=64)
+    model = DCGAN(*data.dims, latent_dim=128, ngf=128, ndf=128)
     trainer = L.Trainer(
-        max_epochs=50,
+        max_epochs=150,
         logger=logger,
         precision="16-mixed",
         callbacks=[
@@ -102,7 +115,7 @@ if __name__ == "__main__":
                 monitor="fid_score",
                 mode="min",
                 dirpath="./checkpoints/dcgan/",
-                filename="dcgan-{epoch:02d}-{d_loss:.2f}-{g_loss:.2f}-{fid_score:.2f}",
+                filename="dcgan-transforms-{epoch:02d}-{d_loss:.2f}-{g_loss:.2f}-{fid_score:.2f}",
             ),
         ],
     )

@@ -75,7 +75,7 @@ class GAN(L.LightningModule):
         width,
         height,
         latent_dim: int = 128,
-        lr: float = 2e-5,
+        lr: float = 2e-4,
         b1: float = 0.5,
         b2: float = 0.999,
         batch_size: int = BATCH_SIZE,
@@ -181,15 +181,15 @@ class GAN(L.LightningModule):
         self.log("fid_score", fid_score, prog_bar=True)
         self.fid.reset()
         z = self.validation_z.type_as(self.generator.model[0].weight)
-
-        # log sampled images
         sample_imgs = self(z)
-        grid = torchvision.utils.make_grid(sample_imgs).permute(1, 2, 0).cpu().numpy()
-        grid_scaled = (grid - grid.min()) / (grid.max() - grid.min())
+        sample_imgs = (sample_imgs + 1) / 2
+        sample_imgs = torch.clamp(sample_imgs, 0, 1)
+        grid = torchvision.utils.make_grid(sample_imgs)
+        grid = grid.permute(1, 2, 0).cpu().numpy()
         epoch = self.current_epoch
         run_id = self.logger.run_id
         self.logger.experiment.log_image(
-            image=grid_scaled, step=epoch, run_id=run_id, key="validation_epoch_img"
+            image=grid, step=epoch, run_id=run_id, key="validation_epoch_img"
         )
 
 
@@ -208,7 +208,7 @@ if __name__ == "__main__":
     L.seed_everything(42)
     torch.set_float32_matmul_precision("medium")
     trainer = L.Trainer(
-        max_epochs=50,
+        max_epochs=150,
         logger=logger,
         precision="16-mixed",
         callbacks=[
@@ -216,7 +216,7 @@ if __name__ == "__main__":
                 monitor="fid_score",
                 mode="min",
                 dirpath="./checkpoints/gan/",
-                filename="gan-{epoch:02d}-{d_loss:.2f}-{g_loss:.2f}-{fid_score:.2f}",
+                filename="gan-transforms-{epoch:02d}-{d_loss:.2f}-{g_loss:.2f}-{fid_score:.2f}",
             ),
         ],
     )
