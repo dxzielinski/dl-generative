@@ -26,6 +26,7 @@ class CatsDataModule(L.LightningDataModule):
         self.dims = (3, 64, 64)
         self.transform_train = transforms.Compose(
             [
+                transforms.Resize((self.dims[1], self.dims[2])),
                 transforms.RandomApply([transforms.RandomRotation(30)], p=0.2),
                 transforms.ToTensor(),
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
@@ -34,6 +35,7 @@ class CatsDataModule(L.LightningDataModule):
         )
         self.transform = transforms.Compose(
             [
+                transforms.Resize((self.dims[1], self.dims[2])),
                 transforms.ToTensor(),
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ]
