@@ -177,3 +177,6 @@ pyrightconfig.json
 
 checkpoints/
 mlruns/
+
+\photos
+.png
