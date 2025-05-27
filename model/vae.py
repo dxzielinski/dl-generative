@@ -1,24 +1,21 @@
+# vae.py
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import lightning as L
 import torchvision
-import torchvision.transforms as transforms
-from torchvision.datasets import ImageFolder
-from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
-import os
-from tqdm import tqdm
+from torchvision.utils import make_grid
+from torchmetrics.image.fid import FrechetInceptionDistance
 
-LATENT_DIM = 128
-IMAGE_SIZE = 64
-BATCH_SIZE = 128
-NUM_EPOCHS = 20
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-DATA_PATH = r"C:\Users\Ksawery\Desktop\gitbub-repos\dl-generative\photos\cats\Data"
+from data import CatsDataModule, PATH_DATASETS, BATCH_SIZE, NUM_WORKERS
 
-# ====== Model ======
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 class Encoder(nn.Module):
-    def __init__(self, img_channels=3, latent_dim=LATENT_DIM):
+    def __init__(self, img_channels=3, latent_dim=128):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(img_channels, 32, 4, 2, 1), nn.ReLU(),
@@ -33,8 +30,9 @@ class Encoder(nn.Module):
         x = self.conv(x)
         return self.fc_mu(x), self.fc_logvar(x)
 
+
 class Decoder(nn.Module):
-    def __init__(self, img_channels=3, latent_dim=LATENT_DIM):
+    def __init__(self, img_channels=3, latent_dim=128):
         super().__init__()
         self.fc = nn.Linear(latent_dim, 128 * 8 * 8)
         self.deconv = nn.Sequential(
@@ -48,11 +46,15 @@ class Decoder(nn.Module):
         x = self.fc(z).view(-1, 128, 8, 8)
         return self.deconv(x)
 
-class VAE(nn.Module):
-    def __init__(self):
+
+class VAE(L.LightningModule):
+    def __init__(self, latent_dim=128, lr=1e-3):
         super().__init__()
-        self.encoder = Encoder()
-        self.decoder = Decoder()
+        self.save_hyperparameters()
+        self.encoder = Encoder(latent_dim=self.hparams.latent_dim)
+        self.decoder = Decoder(latent_dim=self.hparams.latent_dim)
+        self.fid = FrechetInceptionDistance(normalize=True).to(device)
+        self.example_z = torch.randn(16, self.hparams.latent_dim, device=device)
 
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5 * logvar)
@@ -64,66 +66,73 @@ class VAE(nn.Module):
         z = self.reparameterize(mu, logvar)
         return self.decoder(z), mu, logvar
 
-    def loss_function(self, x_hat, x, mu, logvar):
+    def compute_loss(self, x, x_hat, mu, logvar):
         recon = F.mse_loss(x_hat, x, reduction='mean')
         kld = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
         return recon + kld, recon, kld
 
-# ====== Visualization ======
-def show_images(imgs, nrow=8, save_path=None):
-    imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
-    grid = torchvision.utils.make_grid(imgs, nrow=nrow)
-    grid = grid.permute(1, 2, 0).cpu().numpy()
-    plt.figure(figsize=(nrow, 2))
-    plt.axis("off")
-    plt.imshow(grid)
-    if save_path:
-        plt.savefig(save_path)
-    plt.show()
+    def training_step(self, batch, batch_idx):
+        x, _ = batch
+        x = x.to(device)
+        x_hat, mu, logvar = self(x)
+        loss, recon, kld = self.compute_loss(x, x_hat, mu, logvar)
+        self.log_dict({"train_loss": loss, "train_recon": recon, "train_kld": kld})
+        return loss
 
-# ====== Dataset ======
-transform = transforms.Compose([
-    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-    transforms.ToTensor(),
-    transforms.Normalize((0.5,), (0.5,))
-])
-dataset = ImageFolder(root=DATA_PATH, transform=transform)
-train_loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
+    def validation_step(self, batch, batch_idx):
+        x, _ = batch
+        x = x.to(device)
+        x_hat, mu, logvar = self(x)
+        loss, recon, kld = self.compute_loss(x, x_hat, mu, logvar)
+        self.log_dict({"val_loss": loss, "val_recon": recon, "val_kld": kld})
 
-# ====== Training ======
-def main():
-    vae = VAE().to(DEVICE)
-    optimizer = torch.optim.Adam(vae.parameters(), lr=1e-3)
-    losses = []
+        real = (x + 1) / 2
+        fake = (x_hat + 1) / 2
+        self.fid.update(real, real=True)
+        self.fid.update(fake, real=False)
 
-    for epoch in range(NUM_EPOCHS):
-        vae.train()
-        running_loss = 0
-        for x, _ in tqdm(train_loader, desc=f"Epoch {epoch+1}/{NUM_EPOCHS}"):
-            x = x.to(DEVICE)
-            x_hat, mu, logvar = vae(x)
-            loss, recon, kld = vae.loss_function(x_hat, x, mu, logvar)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            running_loss += loss.item()
-
-        avg_loss = running_loss / len(train_loader)
-        losses.append(avg_loss)
-        print(f"Epoch {epoch+1}: loss = {avg_loss:.4f}")
+    def on_validation_epoch_end(self):
+        fid_score = self.fid.compute()
+        self.log("fid_score", fid_score)
+        self.fid.reset()
 
         with torch.no_grad():
-            z = torch.randn(16, LATENT_DIM).to(DEVICE)
-            samples = vae.decoder(z)
-            show_images(samples.cpu(), nrow=4)
+            samples = self.decoder(self.example_z)
+            samples = (samples + 1) / 2
+            grid = make_grid(samples, nrow=4)
+            grid = grid.permute(1, 2, 0).cpu().numpy()
+            plt.imshow(grid)
+            plt.axis("off")
+            plt.show()
 
-    # Plot loss
-    plt.plot(losses)
-    plt.title("VAE Training Loss")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.grid(True)
-    plt.show()
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
+
 
 if __name__ == "__main__":
-    main()
+    L.seed_everything(42)
+    torch.set_float32_matmul_precision("medium")
+
+    data = CatsDataModule(PATH_DATASETS, BATCH_SIZE, NUM_WORKERS)
+    data.setup("fit")
+
+    model = VAE()
+
+    trainer = L.Trainer(
+        max_epochs=50,
+        logger=L.pytorch.loggers.MLFlowLogger(
+            experiment_name="VAE",
+            tracking_uri="./mlruns",
+        ),
+        precision="16-mixed",
+        callbacks=[
+            L.pytorch.callbacks.ModelCheckpoint(
+                monitor="fid_score",
+                mode="min",
+                dirpath="./checkpoints/vae/",
+                filename="vae-{epoch:02d}-{fid_score:.2f}",
+            ),
+        ],
+    )
+
+    trainer.fit(model, datamodule=data)
