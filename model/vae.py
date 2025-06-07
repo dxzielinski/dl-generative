@@ -18,10 +18,13 @@ class Encoder(nn.Module):
     def __init__(self, img_channels=3, latent_dim=128):
         super().__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(img_channels, 32, 4, 2, 1), nn.ReLU(),
-            nn.Conv2d(32, 64, 4, 2, 1), nn.ReLU(),
-            nn.Conv2d(64, 128, 4, 2, 1), nn.ReLU(),
-            nn.Flatten()
+            nn.Conv2d(img_channels, 32, 4, 2, 1),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, 4, 2, 1),
+            nn.ReLU(),
+            nn.Conv2d(64, 128, 4, 2, 1),
+            nn.ReLU(),
+            nn.Flatten(),
         )
         self.fc_mu = nn.Linear(128 * 8 * 8, latent_dim)
         self.fc_logvar = nn.Linear(128 * 8 * 8, latent_dim)
@@ -36,10 +39,12 @@ class Decoder(nn.Module):
         super().__init__()
         self.fc = nn.Linear(latent_dim, 128 * 8 * 8)
         self.deconv = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, 4, 2, 1), nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, 4, 2, 1), nn.ReLU(),
+            nn.ConvTranspose2d(128, 64, 4, 2, 1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 32, 4, 2, 1),
+            nn.ReLU(),
             nn.ConvTranspose2d(32, img_channels, 4, 2, 1),
-            nn.Tanh()
+            nn.Tanh(),
         )
 
     def forward(self, z):
@@ -67,7 +72,7 @@ class VAE(L.LightningModule):
         return self.decoder(z), mu, logvar
 
     def compute_loss(self, x, x_hat, mu, logvar):
-        recon = F.mse_loss(x_hat, x, reduction='mean')
+        recon = F.mse_loss(x_hat, x, reduction="mean")
         kld = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
         return recon + kld, recon, kld
 
@@ -114,7 +119,6 @@ if __name__ == "__main__":
     torch.set_float32_matmul_precision("medium")
 
     data = CatsDataModule(PATH_DATASETS, BATCH_SIZE, NUM_WORKERS)
-    data.setup("fit")
 
     model = VAE()
 
