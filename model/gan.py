@@ -157,6 +157,9 @@ class GAN(L.LightningModule):
         optimizer_d.step()
         optimizer_d.zero_grad()
         self.untoggle_optimizer(optimizer_d)
+        # log learning rates
+        self.log("lr_g", optimizer_g.param_groups[0]["lr"], prog_bar=True)
+        self.log("lr_d", optimizer_d.param_groups[0]["lr"], prog_bar=True)
 
     def validation_step(self, batch, batch_idx):
         imgs, _ = batch
