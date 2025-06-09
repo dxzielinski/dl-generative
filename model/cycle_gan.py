@@ -1,21 +1,122 @@
 """
-It is not ready yet
+Got inspired by: https://github.com/aitorzip/PyTorch-CycleGAN
+Modified to work well with Lightning and to use FID as a metric.
 """
 
 import itertools
 import random
 import torch
-import torchvision.transforms as transforms
-from torch.utils.data import DataLoader
-from PIL import Image
+import torch.nn as nn
 
-import pytorch_lightning as pl
-from pytorch_lightning import Trainer
-import torchvision
+import lightning as L
+
 from torchmetrics.image.fid import FrechetInceptionDistance
 
-from dcgan import ConvDiscriminator, ConvGenerator
 from data import CycleGANDataModule
+
+
+import torch.nn.functional as F
+
+
+class ResidualBlock(nn.Module):
+    def __init__(self, in_features):
+        super(ResidualBlock, self).__init__()
+
+        conv_block = [
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(in_features, in_features, 3),
+            nn.InstanceNorm2d(in_features),
+            nn.ReLU(inplace=True),
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(in_features, in_features, 3),
+            nn.InstanceNorm2d(in_features),
+        ]
+
+        self.conv_block = nn.Sequential(*conv_block)
+
+    def forward(self, x):
+        return x + self.conv_block(x)
+
+
+class Generator(nn.Module):
+    def __init__(self, input_nc, output_nc, n_residual_blocks=9):
+        super(Generator, self).__init__()
+
+        model = [
+            nn.ReflectionPad2d(3),
+            nn.Conv2d(input_nc, 64, 7),
+            nn.InstanceNorm2d(64),
+            nn.ReLU(inplace=True),
+        ]
+
+        in_features = 64
+        out_features = in_features * 2
+        for _ in range(2):
+            model += [
+                nn.Conv2d(in_features, out_features, 3, stride=2, padding=1),
+                nn.InstanceNorm2d(out_features),
+                nn.ReLU(inplace=True),
+            ]
+            in_features = out_features
+            out_features = in_features * 2
+
+        for _ in range(n_residual_blocks):
+            model += [ResidualBlock(in_features)]
+
+        out_features = in_features // 2
+        for _ in range(2):
+            model += [
+                nn.ConvTranspose2d(
+                    in_features, out_features, 3, stride=2, padding=1, output_padding=1
+                ),
+                nn.InstanceNorm2d(out_features),
+                nn.ReLU(inplace=True),
+            ]
+            in_features = out_features
+            out_features = in_features // 2
+
+        model += [nn.ReflectionPad2d(3), nn.Conv2d(64, output_nc, 7), nn.Tanh()]
+
+        self.model = nn.Sequential(*model)
+
+    def forward(self, x):
+        return self.model(x)
+
+
+class Discriminator(nn.Module):
+    def __init__(self, input_nc):
+        super(Discriminator, self).__init__()
+
+        model = [
+            nn.Conv2d(input_nc, 64, 4, stride=2, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+        ]
+
+        model += [
+            nn.Conv2d(64, 128, 4, stride=2, padding=1),
+            nn.InstanceNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+        ]
+
+        model += [
+            nn.Conv2d(128, 256, 4, stride=2, padding=1),
+            nn.InstanceNorm2d(256),
+            nn.LeakyReLU(0.2, inplace=True),
+        ]
+
+        model += [
+            nn.Conv2d(256, 512, 4, padding=1),
+            nn.InstanceNorm2d(512),
+            nn.LeakyReLU(0.2, inplace=True),
+        ]
+
+        model += [nn.Conv2d(512, 1, 4, padding=1)]
+
+        self.model = nn.Sequential(*model)
+
+    def forward(self, x):
+        x = self.model(x)
+        return F.avg_pool2d(x, x.size()[2:]).view(x.size()[0], -1)
 
 
 class ReplayBuffer:
@@ -52,7 +153,7 @@ def weights_init_normal(m):
         torch.nn.init.constant(m.bias.data, 0.0)
 
 
-class CycleGAN(pl.LightningModule):
+class CycleGAN(L.LightningModule):
     def __init__(
         self,
         lr: float = 0.0002,
@@ -63,15 +164,10 @@ class CycleGAN(pl.LightningModule):
         self.save_hyperparameters()
         self.automatic_optimization = False
 
-        self.netG_A2B = ConvGenerator(input_nc, output_nc)
-        self.netG_B2A = ConvGenerator(output_nc, input_nc)
-        self.netD_A = ConvDiscriminator(input_nc)
-        self.netD_B = ConvDiscriminator(output_nc)
-
-        self.netG_A2B.apply(weights_init_normal)
-        self.netG_B2A.apply(weights_init_normal)
-        self.netD_A.apply(weights_init_normal)
-        self.netD_B.apply(weights_init_normal)
+        self.netG_A2B = Generator(input_nc, output_nc)
+        self.netG_B2A = Generator(output_nc, input_nc)
+        self.netD_A = Discriminator(input_nc)
+        self.netD_B = Discriminator(output_nc)
 
         self.criterion_GAN = torch.nn.MSELoss()
         self.criterion_cycle = torch.nn.L1Loss()
@@ -131,59 +227,74 @@ class CycleGAN(pl.LightningModule):
             ],
         )
 
-    def training_step(self, batch, batch_idx, optimizer_idx):
-        real_A = batch["A"]
-        real_B = batch["B"]
-        target_real = torch.ones(real_A.size(0), device=self.device)
-        target_fake = torch.zeros(real_A.size(0), device=self.device)
+    def training_step(self, batch, batch_idx):
+        if isinstance(batch, dict):
+            real_A = batch["A"]
+            real_B = batch["B"]
+        else:
+            real_A, real_B = batch
+        target_real = torch.ones(real_A.size(0), device=self.device).unsqueeze(1)
+        target_fake = torch.zeros(real_A.size(0), device=self.device).unsqueeze(1)
 
-        if optimizer_idx == 0:
-            same_B = self.netG_A2B(real_B)
-            loss_id_B = self.criterion_identity(same_B, real_B) * 5.0
-            same_A = self.netG_B2A(real_A)
-            loss_id_A = self.criterion_identity(same_A, real_A) * 5.0
+        opt_G, opt_D_A, opt_D_B = self.optimizers()
 
-            fake_B = self.netG_A2B(real_A)
-            loss_GAN_A2B = self.criterion_GAN(self.netD_B(fake_B), target_real)
+        same_B = self.netG_A2B(real_B)
+        loss_id_B = self.criterion_identity(same_B, real_B) * 5.0
+        same_A = self.netG_B2A(real_A)
+        loss_id_A = self.criterion_identity(same_A, real_A) * 5.0
 
-            fake_A = self.netG_B2A(real_B)
-            loss_GAN_B2A = self.criterion_GAN(self.netD_A(fake_A), target_real)
+        fake_B = self.netG_A2B(real_A)
+        loss_GAN_A2B = self.criterion_GAN(self.netD_B(fake_B), target_real)
+        fake_A = self.netG_B2A(real_B)
+        loss_GAN_B2A = self.criterion_GAN(self.netD_A(fake_A), target_real)
 
-            recov_A = self.netG_B2A(fake_B)
-            loss_cycle_ABA = self.criterion_cycle(recov_A, real_A) * 10.0
-            recov_B = self.netG_A2B(fake_A)
-            loss_cycle_BAB = self.criterion_cycle(recov_B, real_B) * 10.0
+        recov_A = self.netG_B2A(fake_B)
+        loss_cycle_ABA = self.criterion_cycle(recov_A, real_A) * 10.0
+        recov_B = self.netG_A2B(fake_A)
+        loss_cycle_BAB = self.criterion_cycle(recov_B, real_B) * 10.0
 
-            loss_G = (
-                loss_id_A
-                + loss_id_B
-                + loss_GAN_A2B
-                + loss_GAN_B2A
-                + loss_cycle_ABA
-                + loss_cycle_BAB
-            )
-            self.log("loss_G", loss_G, prog_bar=True)
-            return loss_G
+        loss_G = (
+            loss_id_A
+            + loss_id_B
+            + loss_GAN_A2B
+            + loss_GAN_B2A
+            + loss_cycle_ABA
+            + loss_cycle_BAB
+        )
 
-        if optimizer_idx == 1:
-            loss_D_real = self.criterion_GAN(self.netD_A(real_A), target_real)
-            fake_A = self.fake_A_buffer.push_and_pop(self.netG_B2A(real_B))
-            loss_D_fake = self.criterion_GAN(self.netD_A(fake_A.detach()), target_fake)
-            loss_D_A = (loss_D_real + loss_D_fake) * 0.5
-            self.log("loss_D_A", loss_D_A, prog_bar=True)
-            return loss_D_A
+        opt_G.zero_grad()
+        self.manual_backward(loss_G)
+        opt_G.step()
+        self.log("loss_G", loss_G, prog_bar=True)
 
-        if optimizer_idx == 2:
-            loss_D_real = self.criterion_GAN(self.netD_B(real_B), target_real)
-            fake_B = self.fake_B_buffer.push_and_pop(self.netG_A2B(real_A))
-            loss_D_fake = self.criterion_GAN(self.netD_B(fake_B.detach()), target_fake)
-            loss_D_B = (loss_D_real + loss_D_fake) * 0.5
-            self.log("loss_D_B", loss_D_B, prog_bar=True)
-            return loss_D_B
+        self.log("lr_G", opt_G.param_groups[0]["lr"], prog_bar=True)
+
+        loss_D_real = self.criterion_GAN(self.netD_A(real_A), target_real)
+        fake_A_buff = self.fake_A_buffer.push_and_pop(self.netG_B2A(real_B))
+        loss_D_fake = self.criterion_GAN(self.netD_A(fake_A_buff.detach()), target_fake)
+        loss_D_A = (loss_D_real + loss_D_fake) * 0.5
+        opt_D_A.zero_grad()
+        self.manual_backward(loss_D_A)
+        opt_D_A.step()
+        self.log("loss_D_A", loss_D_A, prog_bar=True)
+        loss_D_real = self.criterion_GAN(self.netD_B(real_B), target_real)
+        fake_B_buff = self.fake_B_buffer.push_and_pop(self.netG_A2B(real_A))
+        loss_D_fake = self.criterion_GAN(self.netD_B(fake_B_buff.detach()), target_fake)
+        loss_D_B = (loss_D_real + loss_D_fake) * 0.5
+
+        opt_D_B.zero_grad()
+        self.manual_backward(loss_D_B)
+        opt_D_B.step()
+        self.log("loss_D_B", loss_D_B, prog_bar=True)
+
+        return loss_G
 
     def validation_step(self, batch, batch_idx):
-        real_A = batch["A"]
-        real_B = batch["B"]
+        if isinstance(batch, dict):
+            real_A = batch["A"]
+            real_B = batch["B"]
+        else:
+            real_A, real_B = batch
 
         fake_B = self.netG_A2B(real_A)
         fake_A = self.netG_B2A(real_B)
@@ -203,38 +314,30 @@ class CycleGAN(pl.LightningModule):
         self.log("fid_score", fid_score, prog_bar=True)
         self.fid.reset()
 
-        num_samples = 8
-        z_A = torch.randn(num_samples, self.hparams.input_nc, device=self.device)
-        z_B = torch.randn(num_samples, self.hparams.output_nc, device=self.device)
-        samples_A2B = self.netG_A2B(z_A)
-        samples_B2A = self.netG_B2A(z_B)
-        samples = torch.cat([samples_A2B, samples_B2A], dim=0)
-        samples = (samples + 1) / 2
-        grid = torchvision.utils.make_grid(samples, nrow=num_samples)
-        grid = grid.permute(1, 2, 0).cpu().numpy()
-        epoch = self.current_epoch
-        run_id = self.logger.run_id
-        self.logger.experiment.log_image(
-            image=grid, step=epoch, run_id=run_id, key="validation_epoch_img"
-        )
-
-    def test_step(self, batch, batch_idx):
-        real_A = batch["A"]
-        real_B = batch["B"]
-        fake_B = self.netG_A2B(real_A)
-        fake_A = self.netG_B2A(real_B)
-        real_A = (real_A + 1) / 2
-        real_B = (real_B + 1) / 2
-        fake_A = (fake_A + 1) / 2
-        fake_B = (fake_B + 1) / 2
-        self.fid.update(real_A, real=True)
-        self.fid.update(fake_A, real=False)
-        self.fid.update(real_B, real=True)
-        self.fid.update(fake_B, real=False)
-
 
 if __name__ == "__main__":
-    data = CycleGANDataModule()
+    torch.cuda.empty_cache()
+    L.seed_everything(42)
+    logger = L.pytorch.loggers.MLFlowLogger(
+        experiment_name="CycleGAN",
+        tracking_uri="./mlruns",
+    )
+    data = CycleGANDataModule(
+        data_dir="/home/dxzielinski/Downloads/dogs-vs-cats-cycle", batch_size=64
+    )
     model = CycleGAN()
-    trainer = Trainer(max_epochs=model.hparams.n_epochs)
+    torch.set_float32_matmul_precision("medium")
+    trainer = L.Trainer(
+        max_epochs=50,
+        logger=logger,
+        precision="16-mixed",
+        callbacks=[
+            L.pytorch.callbacks.ModelCheckpoint(
+                monitor="fid_score",
+                mode="min",
+                dirpath="./checkpoints/cycle-gan/",
+                filename="cycle-gan-{epoch:02d}-{fid_score:.2f}",
+            ),
+        ],
+    )
     trainer.fit(model, datamodule=data)
