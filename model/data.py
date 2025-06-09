@@ -196,3 +196,7 @@ class CatsDogsDataModule(L.LightningDataModule):
         return DataLoader(
             self.test_ds, batch_size=self.batch_size, num_workers=self.num_workers
         )
+
+
+class CycleGANDataModule(L.LightningDataModule):
+    pass
