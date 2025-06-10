@@ -302,7 +302,6 @@ class CycleGANDataModule(L.LightningDataModule):
         self.num_workers = num_workers
         self.dims = (3, 64, 64)
 
-        # your existing transforms
         self.transform_train = transforms.Compose(
             [
                 transforms.Resize(self.dims[1:]),
